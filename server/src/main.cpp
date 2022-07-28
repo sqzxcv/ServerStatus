@@ -7,6 +7,8 @@
 #include <json.h>
 #include "server.h"
 #include "main.h"
+#include "exprtk.hpp"
+#include "curl/curl.h"
 
 #if defined(CONF_FAMILY_UNIX)
 	#include <signal.h>
@@ -96,6 +98,13 @@ void CMain::OnDelClient(int ClientNetID)
 {
 	int ClientID = ClientNetToClient(ClientNetID);
 	dbg_msg("main", "OnDelClient(ncid=%d, cid=%d)", ClientNetID, ClientID);
+    //copy offline message for watchdog
+    WatchdogMessage(ClientNetID,
+                    0, 0, 0, 0, 0, 0,
+                    0, 0, 0,0, 0, 0,
+                    0, 0, 0, 0, 0, 0,
+                    0, 0, 0,0, 0, 0,
+                    0, 0, 0, 0);
 	if(ClientID >= 0 && ClientID < NET_MAX_CLIENTS)
 	{
 		Client(ClientID)->m_Connected = false;
@@ -191,6 +200,19 @@ int CMain::HandleMessage(int ClientNetID, char *pMessage)
 		if(rStart["custom"].type == json_string)
 			str_copy(pClient->m_Stats.m_aCustom, rStart["custom"].u.string.ptr, sizeof(pClient->m_Stats.m_aCustom));
 
+		//copy message for watchdog to analysis
+        WatchdogMessage(ClientNetID,
+                        pClient->m_Stats.m_Load_1, pClient->m_Stats.m_Load_5, pClient->m_Stats.m_Load_15,
+                        pClient->m_Stats.m_ping_10010, pClient->m_Stats.m_ping_189, pClient->m_Stats.m_ping_10086,
+                        pClient->m_Stats.m_time_10010, pClient->m_Stats.m_time_189, pClient->m_Stats.m_time_10086,
+                        pClient->m_Stats.m_tcpCount, pClient->m_Stats.m_udpCount, pClient->m_Stats.m_processCount,
+                        pClient->m_Stats.m_threadCount, pClient->m_Stats.m_NetworkRx, pClient->m_Stats.m_NetworkTx,
+                        pClient->m_Stats.m_NetworkIN, pClient->m_Stats.m_NetworkOUT,pClient->m_Stats.m_MemTotal,
+                        pClient->m_Stats.m_MemUsed, pClient->m_Stats.m_SwapTotal, pClient->m_Stats.m_SwapUsed,
+                        pClient->m_Stats.m_HDDTotal, pClient->m_Stats.m_HDDUsed, pClient->m_Stats.m_IORead,
+                        pClient->m_Stats.m_IOWrite, pClient->m_Stats.m_CPU, pClient->m_Stats.m_Online4,
+                        pClient->m_Stats.m_Online6);
+
 		if(m_Config.m_Verbose)
 		{
 			if(rStart["online4"].type)
@@ -232,6 +254,111 @@ int CMain::HandleMessage(int ClientNetID, char *pMessage)
 		m_Server.Network()->Send(ClientNetID, "1");
 
 	return 1;
+}
+
+
+void CMain::WatchdogMessage(int ClientNetID, double load_1, double load_5, double load_15, double ping_10010, double ping_189, double ping_10086,
+                            double time_10010, double time_189, double time_10086, double tcp, double udp, double process, double thread,
+                            double network_rx, double network_tx, double network_in, double network_out, double memory_total, double memory_used,
+                            double swap_total, double swap_used, double hdd_total, double hdd_used, double io_read, double io_write, double cpu,
+                            double online4, double online6)
+{
+    int ID = 0;
+    while (strcmp(Watchdog(ID)->m_aName, "NULL"))
+    {
+        typedef exprtk::symbol_table<double> symbol_table_t;
+        typedef exprtk::expression<double>   expression_t;
+        typedef exprtk::parser<double>       parser_t;
+        const std::string expression_string = Watchdog(ID)->m_aRule;
+
+        symbol_table_t symbol_table;
+        symbol_table.add_variable("load_1",load_1);
+        symbol_table.add_variable("load_5",load_5);
+        symbol_table.add_variable("load_15",load_15);
+        symbol_table.add_variable("ping_10010",ping_10010);
+        symbol_table.add_variable("ping_189",ping_189);
+        symbol_table.add_variable("ping_10086",ping_10086);
+        symbol_table.add_variable("time_10010",time_10010);
+        symbol_table.add_variable("time_189",time_189);
+        symbol_table.add_variable("time_10086",time_10086);
+        symbol_table.add_variable("tcp",tcp);
+        symbol_table.add_variable("udp",udp);
+        symbol_table.add_variable("process",process);
+        symbol_table.add_variable("thread",thread);
+        symbol_table.add_variable("network_rx",network_rx);
+        symbol_table.add_variable("network_tx",network_tx);
+        symbol_table.add_variable("network_in",network_in);
+        symbol_table.add_variable("network_out",network_out);
+        symbol_table.add_variable("memory_total",memory_total);
+        symbol_table.add_variable("memory_used",memory_used);
+        symbol_table.add_variable("swap_total",swap_total);
+        symbol_table.add_variable("swap_used",swap_used);
+        symbol_table.add_variable("hdd_total",hdd_total);
+        symbol_table.add_variable("hdd_used",hdd_used);
+        symbol_table.add_variable("io_read",io_read);
+        symbol_table.add_variable("io_write",io_write);
+        symbol_table.add_variable("cpu",cpu);
+        symbol_table.add_variable("online4",online4);
+        symbol_table.add_variable("online6",online6);
+        symbol_table.add_constants();
+
+        expression_t expression;
+        expression.register_symbol_table(symbol_table);
+
+        parser_t parser;
+        parser.compile(expression_string,expression);
+
+        if (expression.value() > 0)
+        {
+            int ClientID = ClientNetToClient(ClientNetID);
+            time_t currentStamp = (long long)time(/*ago*/0);
+            if ((currentStamp-Client(ClientID)->m_AlarmLastTime) > Watchdog(ID)->m_aInterval)
+            {
+                //todo 这里需要换成线程
+                Client(ClientID)->m_AlarmLastTime = currentStamp;
+                CURL *curl;
+                CURLcode res;
+                curl_global_init(CURL_GLOBAL_ALL);
+
+                curl = curl_easy_init();
+                if(curl) {
+                    //standard time
+                    char standardTime[32]= { 0 };
+                    strftime(standardTime, sizeof(standardTime), "%Y-%m-%d %H:%M:%S",localtime(&currentStamp));
+
+                    //url encode
+                    char encodeBuffer[2048] = { 0 };
+                    sprintf(encodeBuffer, " \n\n【告警名称】 %s \n\n【告警规则】 %s  \n\n【告警时间】 %s  \n\n ---------------- \n\n【用户名】 %s \n\n【节点名】 %s \n\n【虚拟化】 %s \n\n【主机名】 %s \n\n【位  置】 %s",
+                            Watchdog(ID)->m_aName,
+                            Watchdog(ID)->m_aRule,
+                            standardTime,
+                            Client(ClientID)->m_aUsername,
+                            Client(ClientID)->m_aName,
+                            Client(ClientID)->m_aType,
+                            Client(ClientID)->m_aHost,
+                            Client(ClientID)->m_aLocation);
+                    char *encodeUrl = curl_easy_escape(curl, encodeBuffer, strlen(encodeBuffer));
+
+                    //standard url
+                    char urlBuffer[2048] = { 0 };
+                    sprintf(urlBuffer, "%s%s",Watchdog(ID)->m_aCallback, encodeUrl);
+
+
+                    curl_easy_setopt(curl, CURLOPT_URL, urlBuffer);
+                    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 3L);
+                    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 6L);
+                    res = curl_easy_perform(curl);
+                    if(res != CURLE_OK)
+                        fprintf(stderr, "watchdog failed: %s\n", curl_easy_strerror(res));
+                    if(encodeUrl)
+                        curl_free(encodeUrl);
+                    curl_easy_cleanup(curl);
+                }
+                curl_global_cleanup();
+            }
+        }
+        ID++;
+    }
 }
 
 void CMain::JSONUpdateThread(void *pUser)
@@ -412,6 +539,28 @@ int CMain::ReadConfig()
 		}
 	}
 
+	// watch dog
+	// support by: https://cpp.la
+	ID = 0;
+	const json_value &jStart = (*pJsonData)["watchdog"];
+	if(jStart.type == json_array)
+    {
+        for(unsigned i = 0; i < jStart.u.array.length; i++)
+        {
+            if(ID < 0 || ID >= NET_MAX_CLIENTS)
+                continue;
+
+            str_copy(Watchdog(ID)->m_aName, jStart[i]["name"].u.string.ptr, sizeof(Watchdog(ID)->m_aName));
+            str_copy(Watchdog(ID)->m_aRule, jStart[i]["rule"].u.string.ptr, sizeof(Watchdog(ID)->m_aRule));
+            Watchdog(ID)->m_aInterval = jStart[i]["interval"].u.integer;
+            str_copy(Watchdog(ID)->m_aCallback, jStart[i]["callback"].u.string.ptr, sizeof(Watchdog(ID)->m_aCallback));
+
+            ID++;
+        }
+        str_copy(Watchdog(ID)->m_aName, "NULL", sizeof(Watchdog(ID)->m_aName));
+    } else
+        str_copy(Watchdog(ID)->m_aName, "NULL", sizeof(Watchdog(ID)->m_aName));
+
 	// if file exists, read last network traffic record，reset m_LastNetworkIN and m_LastNetworkOUT
 	// support by: https://cpp.la
     IOHANDLE nFile = io_open(m_Config.m_aJSONFile, IOFLAG_READ);
@@ -561,3 +710,4 @@ int main(int argc, const char *argv[])
 
 	return RetVal;
 }
+

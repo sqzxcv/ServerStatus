@@ -38,10 +38,11 @@ class CMain
 		char m_aPassword[128];
         int m_aMonthStart;          //track month network traffic. by: https://cpp.la
 
-        int64_t m_LastNetworkIN;
-        int64_t m_LastNetworkOUT;
-		int64 m_TimeConnected;
-		int64 m_LastUpdate;
+        int64_t m_LastNetworkIN;    //restore month traffic info.
+        int64_t m_LastNetworkOUT;   //restore month traffic info.
+		int64_t m_TimeConnected;
+		int64_t m_LastUpdate;
+        int64_t m_AlarmLastTime;    //record last alarm time.
 
 		struct CStats
 		{
@@ -82,6 +83,13 @@ class CMain
 		} m_Stats;
 	} m_aClients[NET_MAX_CLIENTS];
 
+	struct CWatchDog{
+	    char m_aName[128];
+	    char m_aRule[128];
+        int  m_aInterval;
+	    char m_aCallback[1024];
+	} m_aCWatchDogs[NET_MAX_CLIENTS];
+
 	struct CJSONUpdateThreadData
 	{
 		CClient *pClients;
@@ -98,6 +106,14 @@ public:
 	int HandleMessage(int ClientNetID, char *pMessage);
 	int ReadConfig();
 	int Run();
+
+    CWatchDog *Watchdog(int ruleID) { return &m_aCWatchDogs[ruleID]; }
+    void WatchdogMessage(int ClientNetID,
+                         double load_1, double load_5, double load_15, double ping_10010, double ping_189, double ping_10086,
+                         double time_10010, double time_189, double time_10086, double tcp, double udp, double process, double thread,
+                         double network_rx, double network_tx, double network_in, double network_out,double memory_total,
+                         double memory_used,double swap_total, double swap_used, double hdd_total,
+                         double hdd_used, double io_read, double io_write, double cpu,double online4, double online6);
 
 	CClient *Client(int ClientID) { return &m_aClients[ClientID]; }
 	CClient *ClientNet(int ClientNetID);
